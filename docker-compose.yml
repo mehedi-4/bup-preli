@@ -12,7 +12,9 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash-lite}
-      - PRIMARY_PROVIDER=${PRIMARY_PROVIDER:-openai}
+      - PRIMARY_PROVIDER=${PRIMARY_PROVIDER:-gemini}
       - PORT=8000
       - HOST=0.0.0.0
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-5.0}
+      - GEMINI_TIMEOUT_SECONDS=${GEMINI_TIMEOUT_SECONDS:-10.0}
     restart: unless-stopped

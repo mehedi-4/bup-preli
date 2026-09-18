@@ -8,14 +8,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.schemas import OptimizeEnergyRequest
 from app.main import optimize_energy
-from app.utils.replay import replay_and_verify_schedule
+from app.utils.replay import TOLERANCE, replay_and_verify_schedule
 
-SAMPLE_FILE = "/home/mehedi/Videos/BUP_CSE_FEST_2026_Participant_Docs/BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json"
+SAMPLE_FILE = os.getenv(
+    "GRIDWISE_SAMPLE_FILE",
+    "/home/mehedi/Videos/BUP_CSE_FEST_2026_Participant_Docs/BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json",
+)
 
 def run_tests():
     if not os.path.exists(SAMPLE_FILE):
-        print(f"Sample file not found at {SAMPLE_FILE}")
-        return
+        print(
+            f"Public pack not found at {SAMPLE_FILE}. "
+            "Set GRIDWISE_SAMPLE_FILE to the supplied JSON pack path."
+        )
+        return 1
 
     with open(SAMPLE_FILE) as f:
         data = json.load(f)
@@ -65,7 +71,7 @@ def run_tests():
                         if key in exp_adj:
                             exp_v = exp_adj[key]
                             act_v = act_adj.get(key)
-                            if act_v is None or abs(float(act_v) - float(exp_v)) > 0.02:
+                            if act_v is None or abs(float(act_v) - float(exp_v)) > TOLERANCE:
                                 print(f"  [FAIL] {key} mismatch: expected {exp_v}, got {act_v}")
                                 dir_match = False
 
@@ -84,7 +90,7 @@ def run_tests():
         exp_cost = c["expected_output"]["total_cost_bdt"]
         act_cost = resp.total_cost_bdt
         cost_diff = abs(act_cost - exp_cost)
-        cost_ok = cost_diff < 0.05
+        cost_ok = cost_diff <= TOLERANCE
 
         if dir_match and is_valid and cost_ok:
             passed_cases += 1
@@ -98,6 +104,7 @@ def run_tests():
     print(f"\n========================================================")
     print(f"RESULTS: {passed_cases}/{total_cases} CASES PASSED")
     print(f"========================================================\n")
+    return 0 if passed_cases == total_cases else 1
 
 if __name__ == "__main__":
-    run_tests()
+    raise SystemExit(run_tests())

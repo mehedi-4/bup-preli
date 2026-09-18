@@ -27,7 +27,7 @@ app = FastAPI(
 # Exception handler for malformed / structurally invalid input (HTTP 400 per section 6.1)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.warning(f"Request validation error: {exc.errors()}")
+    logger.warning("Request validation error with %d issue(s)", len(exc.errors()))
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"detail": "Malformed or structurally invalid request.", "errors": exc.errors()}
@@ -72,7 +72,13 @@ def optimize_energy(req: OptimizeEnergyRequest):
         )
         if not is_valid:
             logger.error(f"Schedule replay verification issues for {req.scenario_id}: {errors}")
-            # Even if minor warnings exist, we return the generated valid plan
+            # Never return a plan that failed the same replay contract the
+            # judge uses. The solver is expected to make this unreachable for
+            # valid organizer scenarios.
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Generated schedule failed deterministic validation."
+            )
 
         return OptimizeEnergyResponse(
             scenario_id=req.scenario_id,
@@ -87,8 +93,8 @@ def optimize_energy(req: OptimizeEnergyRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"Controlled internal error in scenario {req.scenario_id}: {e}")
-        # Return controlled 500 without exposing secrets or raw internal stack trace
+        logger.error("Controlled internal error in scenario %s: %s", req.scenario_id, type(e).__name__)
+        # Return controlled 500 without exposing secrets or raw stack traces.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="A controlled error occurred during scenario optimization."

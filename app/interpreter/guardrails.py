@@ -1,7 +1,11 @@
-from typing import List, Dict, Any, Optional
-from app.schemas import DirectiveInterpretationEntry, BatteryInput
+"""Deterministic validation for untrusted model interpretations."""
 
-from app.interpreter.heuristics import parse_time_window
+import math
+from typing import Any, Dict, List, Optional
+
+from app.interpreter.heuristics import parse_time_windows
+from app.schemas import BatteryInput, DirectiveInterpretationEntry
+
 
 ALLOWED_DIRECTIVES = {
     "solar_reduction",
@@ -9,164 +13,137 @@ ALLOWED_DIRECTIVES = {
     "no_charge_window",
     "no_discharge_window",
     "max_grid_window",
-    "no_op"
+    "no_op",
 }
 
-def clean_and_validate_hours(raw_hours: Any) -> List[int]:
-    """Ensure hours are unique integers from 0 to 23 in ascending order."""
-    if not isinstance(raw_hours, list):
-        return []
-    valid = []
-    for h in raw_hours:
-        try:
-            h_int = int(h)
-            if 0 <= h_int <= 23 and h_int not in valid:
-                valid.append(h_int)
-        except (ValueError, TypeError):
-            continue
-    valid.sort()
-    return valid
+
+def clean_and_validate_hours(raw_hours: Any) -> Optional[List[int]]:
+    """Return hours only when they exactly satisfy the canonical hour rules."""
+
+    if not isinstance(raw_hours, list) or not raw_hours:
+        return None
+    if any(isinstance(hour, bool) or not isinstance(hour, int) for hour in raw_hours):
+        return None
+    if len(set(raw_hours)) != len(raw_hours):
+        return None
+    if any(hour < 0 or hour > 23 for hour in raw_hours):
+        return None
+    if raw_hours != sorted(raw_hours):
+        return None
+    return list(raw_hours)
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _safe_no_op(note_idx: int, explanation: str) -> DirectiveInterpretationEntry:
+    return DirectiveInterpretationEntry(
+        note_index=note_idx,
+        applies=False,
+        directive_type="no_op",
+        structured_adjustment=None,
+        explanation=explanation,
+    )
+
 
 def validate_and_sanitize_directive(
     raw_entry: Dict[str, Any],
     note_idx: int,
     battery: BatteryInput,
-    note_text: Optional[str] = None
+    note_text: Optional[str] = None,
 ) -> DirectiveInterpretationEntry:
-    """
-    Validates a raw directive dictionary against Problem Statement guardrails (Section 08 & 04).
-    Sanitizes keys to ensure exact required shapes.
-    Safely falls back to no_op if structure is invalid.
-    """
+    """Validate one model result without inventing or clamping constraints."""
+
+    if not isinstance(raw_entry, dict):
+        return _safe_no_op(note_idx, "Malformed model output was safely ignored.")
+
     raw_type = str(raw_entry.get("directive_type", "")).strip().lower()
     explanation = str(raw_entry.get("explanation", "")).strip() or "Operator note interpretation."
 
     if raw_type not in ALLOWED_DIRECTIVES:
-        # Unsupported type -> safe failure downgrade to no_op
-        return DirectiveInterpretationEntry(
-            note_index=note_idx,
-            applies=False,
-            directive_type="no_op",
-            structured_adjustment=None,
-            explanation=f"Safely handled unsupported directive type: {raw_type}"
-        )
-
+        return _safe_no_op(note_idx, "Unsupported model directive was safely ignored.")
     if raw_type == "no_op":
-        return DirectiveInterpretationEntry(
-            note_index=note_idx,
-            applies=False,
-            directive_type="no_op",
-            structured_adjustment=None,
-            explanation=explanation
-        )
+        return _safe_no_op(note_idx, explanation)
 
-    raw_adj = raw_entry.get("structured_adjustment") or {}
-    hours = clean_and_validate_hours(raw_adj.get("hours"))
+    raw_adj = raw_entry.get("structured_adjustment")
+    if not isinstance(raw_adj, dict):
+        return _safe_no_op(note_idx, "Malformed directive parameters were safely ignored.")
 
-    # Canonical hour window reconciliation:
-    # If the note explicitly specifies a literal time window (e.g. 6 PM until 10 PM),
-    # ensure any boundary/off-by-one LLM artifacts are normalized to exact start-inclusive, end-exclusive hours.
-    if note_text:
-        canonical = parse_time_window(note_text)
-        if canonical:
-            if not hours or set(hours).issubset(set(canonical)) or (hours and hours[0] == canonical[0]):
-                hours = canonical
+    # Canonicalize a single unambiguous range. When a note contains multiple
+    # ranges, retain the model-selected range only if it matches one of them;
+    # blindly selecting the first range can apply the directive to unrelated
+    # contextual times.
+    canonical_windows = parse_time_windows(note_text or "")
+    raw_hours = clean_and_validate_hours(raw_adj.get("hours"))
+    if len(canonical_windows) == 1:
+        hours = canonical_windows[0]
+    elif len(canonical_windows) > 1:
+        if raw_hours is None or raw_hours not in canonical_windows:
+            return _safe_no_op(note_idx, "Directive hours were ambiguous and the directive was safely ignored.")
+        hours = raw_hours
+    elif raw_hours is not None:
+        hours = raw_hours
+    else:
+        return _safe_no_op(note_idx, "Directive hours were invalid and the directive was ignored.")
 
-    if not hours:
-        # Directive without valid hours cannot be applied -> downgrade to no_op
-        return DirectiveInterpretationEntry(
-            note_index=note_idx,
-            applies=False,
-            directive_type="no_op",
-            structured_adjustment=None,
-            explanation=f"No valid hours specified; defaulting to no_op."
-        )
-
-    sanitized_adj: Dict[str, Any] = {"hours": hours}
+    sanitized: Dict[str, Any] = {"hours": hours}
 
     if raw_type == "solar_reduction":
-        try:
-            factor = float(raw_adj.get("factor", 1.0))
-            # Clamp factor between 0.0 and 1.0
-            factor = max(0.0, min(1.0, factor))
-            sanitized_adj["factor"] = factor
-        except (ValueError, TypeError):
-            return DirectiveInterpretationEntry(
-                note_index=note_idx,
-                applies=False,
-                directive_type="no_op",
-                structured_adjustment=None,
-                explanation="Invalid solar factor; defaulting to no_op."
-            )
-
+        factor = _finite_number(raw_adj.get("factor"))
+        if factor is None or not 0.0 <= factor <= 1.0:
+            return _safe_no_op(note_idx, "Solar factor was outside the allowed range and was ignored.")
+        sanitized["factor"] = factor
     elif raw_type == "minimum_battery_reserve":
-        try:
-            min_energy = float(raw_adj.get("minimum_energy_kwh", battery.minimum_energy_kwh))
-            min_energy = max(0.0, min(battery.capacity_kwh, min_energy))
-            sanitized_adj["minimum_energy_kwh"] = min_energy
-        except (ValueError, TypeError):
-            return DirectiveInterpretationEntry(
-                note_index=note_idx,
-                applies=False,
-                directive_type="no_op",
-                structured_adjustment=None,
-                explanation="Invalid minimum energy reserve; defaulting to no_op."
-            )
-
-    elif raw_type in ("no_charge_window", "no_discharge_window"):
-        # Section 04: shape is strictly {"hours": [...]}
-        pass
-
+        reserve = _finite_number(raw_adj.get("minimum_energy_kwh"))
+        if reserve is None or not 0.0 <= reserve <= battery.capacity_kwh:
+            return _safe_no_op(note_idx, "Battery reserve was outside the allowed range and was ignored.")
+        sanitized["minimum_energy_kwh"] = reserve
     elif raw_type == "max_grid_window":
-        try:
-            max_grid = float(raw_adj.get("max_grid_kwh", 0.0))
-            sanitized_adj["max_grid_kwh"] = max(0.0, max_grid)
-        except (ValueError, TypeError):
-            return DirectiveInterpretationEntry(
-                note_index=note_idx,
-                applies=False,
-                directive_type="no_op",
-                structured_adjustment=None,
-                explanation="Invalid max grid limit; defaulting to no_op."
-            )
+        grid_cap = _finite_number(raw_adj.get("max_grid_kwh"))
+        if grid_cap is None or grid_cap < 0.0:
+            return _safe_no_op(note_idx, "Grid cap was outside the allowed range and was ignored.")
+        sanitized["max_grid_kwh"] = grid_cap
+    # no_charge_window and no_discharge_window require only {"hours": [...]}.
 
     return DirectiveInterpretationEntry(
         note_index=note_idx,
         applies=True,
-        directive_type=raw_type,  # type: ignore
-        structured_adjustment=sanitized_adj,
-        explanation=explanation
+        directive_type=raw_type,  # type: ignore[arg-type]
+        structured_adjustment=sanitized,
+        explanation=explanation,
     )
 
-def validate_interpretations_list(
-    raw_directives: List[Dict[str, Any]],
-    operator_notes: List[str],
-    battery: BatteryInput
-) -> List[DirectiveInterpretationEntry]:
-    """
-    Validates that every operator note has exactly one directive entry in note_index order.
-    """
-    num_notes = len(operator_notes)
-    by_index: Dict[int, Dict[str, Any]] = {}
 
-    for d in raw_directives:
-        try:
-            idx = int(d.get("note_index", -1))
-            if 0 <= idx < num_notes and idx not in by_index:
-                by_index[idx] = d
-        except (ValueError, TypeError):
+def validate_interpretations_list(
+    raw_directives: Any,
+    operator_notes: List[str],
+    battery: BatteryInput,
+) -> List[DirectiveInterpretationEntry]:
+    """Return exactly one ordered, guardrailed entry per operator note."""
+
+    if not isinstance(raw_directives, list):
+        raw_directives = []
+
+    by_index: Dict[int, Dict[str, Any]] = {}
+    for raw in raw_directives:
+        if not isinstance(raw, dict):
             continue
+        index = raw.get("note_index", -1)
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if 0 <= index < len(operator_notes) and index not in by_index:
+            by_index[index] = raw
 
     validated: List[DirectiveInterpretationEntry] = []
-    for idx in range(num_notes):
-        raw = by_index.get(idx, {
-            "note_index": idx,
-            "applies": False,
-            "directive_type": "no_op",
-            "structured_adjustment": None,
-            "explanation": "No directive generated; defaulted to no_op."
-        })
-        entry = validate_and_sanitize_directive(raw, idx, battery, note_text=operator_notes[idx])
-        validated.append(entry)
-
+    for index, note in enumerate(operator_notes):
+        raw = by_index.get(index)
+        if raw is None:
+            validated.append(_safe_no_op(index, "No valid model interpretation was returned."))
+        else:
+            validated.append(validate_and_sanitize_directive(raw, index, battery, note_text=note))
     return validated

@@ -1,6 +1,8 @@
 import json
 import logging
 import httpx
+from collections import OrderedDict
+from threading import Lock
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
@@ -75,10 +77,29 @@ DIRECTIVE RULES:
 """
 
 class LLMService:
+    CACHE_MAX_ENTRIES = 512
+
     def __init__(self):
         self._openai_client = None
         self._gemini_client = None
-        self._cache: Dict[str, List[DirectiveInterpretationEntry]] = {}
+        self._cache: OrderedDict[str, tuple[DirectiveInterpretationEntry, ...]] = OrderedDict()
+        self._cache_lock = Lock()
+
+    @staticmethod
+    def _cache_key(operator_notes: List[str], battery: BatteryInput) -> str:
+        """Build a stable key without including credentials or other secrets."""
+
+        return json.dumps(
+            {
+                "operator_notes": operator_notes,
+                "battery": battery.model_dump(),
+                "primary_provider": settings.PRIMARY_PROVIDER,
+                "openai_model": settings.OPENAI_MODEL,
+                "gemini_model": settings.GEMINI_MODEL,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
 
     def _get_openai_client(self):
         if self._openai_client is None and settings.OPENAI_API_KEY:
@@ -86,19 +107,27 @@ class LLMService:
                 from openai import OpenAI
                 self._openai_client = OpenAI(
                     api_key=settings.OPENAI_API_KEY,
+                    max_retries=0,
                     http_client=httpx.Client(timeout=settings.REQUEST_TIMEOUT_SECONDS)
                 )
             except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {e}")
+                logger.error("Failed to initialize OpenAI client: %s", type(e).__name__)
         return self._openai_client
 
     def _get_gemini_client(self):
         if self._gemini_client is None and settings.GEMINI_API_KEY:
             try:
                 from google import genai
-                self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                from google.genai import types
+                self._gemini_client = genai.Client(
+                    api_key=settings.GEMINI_API_KEY,
+                    http_options=types.HttpOptions(
+                        timeout=int(settings.GEMINI_TIMEOUT_SECONDS * 1000),
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
+                )
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini client: {e}")
+                logger.error("Failed to initialize Gemini client: %s", type(e).__name__)
         return self._gemini_client
 
     def _call_openai(self, prompt: str, battery: BatteryInput) -> List[Dict[str, Any]]:
@@ -122,7 +151,9 @@ class LLMService:
             temperature=0.0
         )
         parsed = response.choices[0].message.parsed
-        return [item.model_dump() for item in parsed.directives]
+        if parsed is None:
+            raise ValueError("OpenAI returned no structured interpretation")
+        return [item.model_dump(exclude_none=True) for item in parsed.directives]
 
     def _call_gemini(self, prompt: str, battery: BatteryInput) -> List[Dict[str, Any]]:
         client = self._get_gemini_client()
@@ -149,7 +180,10 @@ class LLMService:
             )
         )
         data = json.loads(response.text)
-        return data.get("directives", [])
+        directives = data.get("directives", [])
+        if not isinstance(directives, list):
+            raise ValueError("Gemini returned a malformed directives list")
+        return directives
 
     def interpret_notes(
         self,
@@ -160,9 +194,12 @@ class LLMService:
         Interprets notes using LLM with dual-provider fallback and deterministic guardrails.
         """
         # Cache check
-        cache_key = f"{tuple(operator_notes)}_{battery.capacity_kwh}_{battery.minimum_energy_kwh}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        cache_key = self._cache_key(operator_notes, battery)
+        with self._cache_lock:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self._cache.move_to_end(cache_key)
+                return list(cached)
 
         user_prompt_lines = [f"Note {idx}: {note}" for idx, note in enumerate(operator_notes)]
         prompt = "\n".join(user_prompt_lines)
@@ -177,17 +214,23 @@ class LLMService:
                 if provider == "openai" and settings.OPENAI_API_KEY:
                     logger.info(f"Interpreting notes using OpenAI ({settings.OPENAI_MODEL})...")
                     raw_directives = self._call_openai(prompt, battery)
+                    if not raw_directives:
+                        raise ValueError("OpenAI returned an empty directives list")
                     break
                 elif provider == "gemini" and settings.GEMINI_API_KEY:
                     logger.info(f"Interpreting notes using Gemini ({settings.GEMINI_MODEL})...")
                     raw_directives = self._call_gemini(prompt, battery)
+                    if not raw_directives:
+                        raise ValueError("Gemini returned an empty directives list")
                     break
             except Exception as err:
-                logger.warning(f"Provider {provider} failed: {err}. Attempting fallback...")
+                logger.warning("Provider %s failed with %s; attempting fallback", provider, type(err).__name__)
 
-        # If all LLMs failed, use safe heuristic fallback
+        # Emergency continuity path only. The judged deployment must configure
+        # at least one language-capable provider; this parser is not presented
+        # as a replacement for the mandatory LLM interpretation stage.
         if raw_directives is None:
-            logger.warning("All LLM providers unavailable. Falling back to heuristic parsing.")
+            logger.warning("All LLM providers unavailable. Using emergency heuristic parsing.")
             raw_directives = [
                 fallback_heuristic_parse(note, idx, battery)
                 for idx, note in enumerate(operator_notes)
@@ -196,7 +239,14 @@ class LLMService:
         # Apply deterministic guardrails to clean, validate, and ensure Section 04/08 compliance
         validated = validate_interpretations_list(raw_directives, operator_notes, battery)
 
-        self._cache[cache_key] = validated
+        # Never replace a valid language-model no_op with a keyword-generated
+        # constraint. Deterministic code may validate and normalize model
+        # output, but must not supersede its semantic relevance decision.
+        with self._cache_lock:
+            self._cache[cache_key] = tuple(validated)
+            self._cache.move_to_end(cache_key)
+            while len(self._cache) > self.CACHE_MAX_ENTRIES:
+                self._cache.popitem(last=False)
         return validated
 
 llm_service = LLMService()

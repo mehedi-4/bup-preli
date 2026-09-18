@@ -1,5 +1,5 @@
-# Use official lightweight Python image
-FROM python:3.12-slim
+# Pin the exact base-image digest used for the verified submission build.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies if required for SciPy / C compilation
+# Runtime healthcheck plus compatibility build tools for environments where a
+# binary dependency wheel is unavailable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gcc \
@@ -26,6 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY app/ app/
 COPY tests/ tests/
+
+# The API does not require root privileges.
+RUN useradd --create-home --uid 10001 gridwise \
+    && chown -R gridwise:gridwise /app
+USER gridwise
 
 # Expose default HTTP service port
 EXPOSE 8000

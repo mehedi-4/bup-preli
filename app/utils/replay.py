@@ -2,7 +2,9 @@ import math
 from typing import List, Tuple
 from app.schemas import HourInput, BatteryInput, DirectiveInterpretationEntry, HourlyPlanEntry
 
-TOLERANCE = 0.02  # Problem statement specifies 0.01 kWh / 0.01 BDT
+# The official tolerance is 0.01 kWh / 0.01 BDT. Keep a tiny floating-point
+# cushion without weakening the documented threshold.
+TOLERANCE = 0.010000001
 
 def replay_and_verify_schedule(
     hours: List[HourInput],
@@ -82,6 +84,9 @@ def replay_and_verify_schedule(
             errors.append(f"Hour {h}: solar_used_kwh ({p.solar_used_kwh}) exceeds effective solar ({eff_solar[h]})")
 
         # Battery action checks
+        if p.battery_action not in {"charge", "discharge", "idle"}:
+            errors.append(f"Hour {h}: unsupported battery_action {p.battery_action!r}")
+            continue
         charge_amt = p.battery_kwh if p.battery_action == "charge" else 0.0
         discharge_amt = p.battery_kwh if p.battery_action == "discharge" else 0.0
 

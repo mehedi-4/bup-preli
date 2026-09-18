@@ -12,12 +12,18 @@ class Config:
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 
     PRIMARY_PROVIDER: str = os.getenv(
-        "PRIMARY_PROVIDER", 
-        "openai" if os.getenv("OPENAI_API_KEY", "").strip() else "gemini"
+        "PRIMARY_PROVIDER",
+        "gemini" if os.getenv("GEMINI_API_KEY", "").strip() else "openai"
     ).strip().lower()
 
     PORT: int = int(os.getenv("PORT", "8000"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
-    REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "25.0"))
+    # Keep provider attempts bounded so a failed hosted model cannot consume
+    # the judge's 30-second per-request budget before fallback parsing runs.
+    REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "5.0"))
+    # The Gemini API rejects manually configured deadlines below 10 seconds.
+    GEMINI_TIMEOUT_SECONDS: float = max(
+        10.0, float(os.getenv("GEMINI_TIMEOUT_SECONDS", "10.0"))
+    )
 
 settings = Config()

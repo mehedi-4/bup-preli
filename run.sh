@@ -9,4 +9,4 @@ if [ -f "$DIR/.venv/bin/activate" ]; then
 fi
 
 echo "Starting GridWise LLM Service on http://0.0.0.0:8000 ..."
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}"

@@ -7,7 +7,7 @@
 
 ## 1. Overview & System Architecture
 
-GridWise LLM is an enterprise-grade, high-performance HTTP microservice designed to solve the 24-hour campus energy scheduling problem under dynamic tariffs, solar generation, demand, and unstructured natural language operator directives.
+GridWise LLM is an HTTP service for the 24-hour campus energy scheduling problem under dynamic tariffs, solar generation, demand, and natural-language operator directives.
 
 ### The 4-Stage Processing Pipeline
 
@@ -17,8 +17,8 @@ GridWise LLM is an enterprise-grade, high-performance HTTP microservice designed
                                  ▼
          ┌────────────────────────────────────────────────┐
          │ Stage 1: LLM Directive Interpretation          │
-         │ - Dual-engine: OpenAI (gpt-4o-mini)            │
-         │ - Fallback: Google Gemini (gemini-3.5-flash)   │
+         │ - Primary: Google Gemini (configured model)     │
+         │ - Fallback: OpenAI (gpt-4o-mini)                │
          │ - Structured JSON Output with Pydantic schema  │
          └───────────────────────┬────────────────────────┘
                                  │
@@ -27,14 +27,14 @@ GridWise LLM is an enterprise-grade, high-performance HTTP microservice designed
          │ Stage 2: Deterministic Guardrails              │
          │ - Validates allowed directive types            │
          │ - Enforces unique ascending hours [0..23]      │
-         │ - Clamps solar factors (0-1) and battery caps  │
+         │ - Rejects invalid factors, caps, and reserves  │
          │ - Enforces Section 04 exact adjustment shapes  │
          └───────────────────────┬────────────────────────┘
                                  │
                                  ▼
          ┌────────────────────────────────────────────────┐
          │ Stage 3: MILP Mathematical Optimization        │
-         │ - SciPy HiGHS Solver (sub-10ms dispatch)       │
+         │ - SciPy HiGHS MILP solver                     │
          │ - Physical Battery Dynamics & Rate Limits      │
          │ - End-of-Day State of Charge Neutrality        │
          │ - Minimizes Grid Cost in BDT                   │
@@ -58,11 +58,17 @@ GridWise LLM is an enterprise-grade, high-performance HTTP microservice designed
 
 | Component | Technology / Provider | Role |
 | :--- | :--- | :--- |
-| **Primary LLM** | **OpenAI (`gpt-4o-mini`)** | Structured directive extraction, paraphrase comprehension, distractor filtering. |
-| **Fallback LLM** | **Google Gemini (`gemini-3.5-flash-lite`)** | Automatic failover if primary provider encounters quota/latency issues. |
-| **Catastrophic Fallback** | **Deterministic Heuristic Engine** | Failsafe rule-based parsing ensuring the service never crashes on complete external network outages. |
+| **Primary LLM** | **Google Gemini (`gemini-3.5-flash-lite`)** | Structured directive extraction, paraphrase comprehension, and distractor filtering; selected after passing all public cases with lower measured latency. |
+| **Fallback LLM** | **OpenAI (`gpt-4o-mini`)** | Automatic failover if the primary provider encounters quota or availability issues. |
+| **Emergency Continuity Parser** | **Deterministic Heuristic Engine** | Local diagnostics during complete provider outages; it is not a replacement for the mandatory language-model interpretation path. |
 | **Mathematical Solver** | **SciPy MILP (`HiGHS` solver)** | Exact global cost minimization under hourly linear and integrality constraints. |
 | **API Framework** | **FastAPI + Uvicorn** | High-throughput asynchronous web server complying with the exact challenge schema. |
+
+All runtime dependencies are declared in `requirements.txt`: FastAPI, Uvicorn,
+Pydantic, OpenAI SDK, Google Gen AI SDK, SciPy/HiGHS, NumPy,
+python-dotenv, Requests, and HTTPX. These projects provide the external API,
+model-client, validation, numerical-optimization, configuration, and HTTP
+components used by this submission.
 
 ---
 
@@ -74,21 +80,22 @@ The service uses standard environment variables. You can configure them via a `.
 | :--- | :--- | :--- |
 | `OPENAI_API_KEY` | Paid OpenAI API key | *(Optional if Gemini provided)* |
 | `GEMINI_API_KEY` | Google Gemini API key | *(Optional if OpenAI provided)* |
-| `PRIMARY_PROVIDER` | Preferred provider (`openai` or `gemini`) | `openai` (if key set) else `gemini` |
+| `PRIMARY_PROVIDER` | Preferred provider (`openai` or `gemini`) | `gemini` when its key is available, otherwise `openai` |
 | `OPENAI_MODEL` | OpenAI Model ID | `gpt-4o-mini` |
 | `GEMINI_MODEL` | Gemini Model ID | `gemini-3.5-flash-lite` |
 | `PORT` | HTTP service port | `8000` |
 | `HOST` | Bind host address | `0.0.0.0` |
+| `REQUEST_TIMEOUT_SECONDS` | OpenAI request timeout before provider fallback | `5.0` |
+| `GEMINI_TIMEOUT_SECONDS` | Gemini deadline; its API requires at least 10 seconds | `10.0` |
 
-> **Security Note:** No API keys, credentials, or secrets are baked into this repository or the Docker container. All keys are injected securely at runtime via environment variables.
+> **Security Note:** No API keys, credentials, or secrets are baked into this repository or the Docker container. All keys are injected securely at runtime via environment variables. The judged deployment must provide at least one valid model key so a language-capable model interprets `operator_notes`.
 
 ---
 
 ## 4. Local Quickstart (Fresh Environment)
 
-### Step 1: Clone Repository & Create Virtual Environment
+### Step 1: Enter the Submitted Repository & Create a Virtual Environment
 ```bash
-git clone <repository-url>
 cd bup-preli
 
 python3 -m venv .venv
@@ -99,7 +106,7 @@ pip install -r requirements.txt
 ### Step 2: Configure Environment Variables
 ```bash
 cp .env.example .env
-# Edit .env and insert your API key(s):
+# Add at least one valid provider key for the challenge-compliant LLM path.
 nano .env
 ```
 Or export directly:
@@ -174,12 +181,39 @@ curl -X POST http://localhost:8000/optimize-energy \
   }'
 ```
 
-### 3. Run Automated Validation Test Suite
-Execute the test runner against the 10 official public sample cases:
+### 3. Run deterministic service and guardrail checks
+These in-process checks validate request handling, optimization, exact output
+shape, LLM authority, and adversarial time-window normalization:
 ```bash
-python tests/test_samples.py
+OPENAI_API_KEY= GEMINI_API_KEY= ./.venv/bin/python tests/test_api.py
+./.venv/bin/python tests/test_interpreter.py
 ```
-**Results:** `10/10 CASES PASSED` with 0.0000 cost error and 100% semantic directive accuracy.
+
+### 4. Run the supplied 10-case public pack
+Point the runner at the JSON file supplied with the participant documents:
+```bash
+GRIDWISE_SAMPLE_FILE="/path/to/BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json" \
+  ./.venv/bin/python tests/test_samples.py
+```
+The verified result for the supplied pack is `10/10 CASES PASSED`, with every directive matching, every replay valid, and every reference cost matched within tolerance.
+
+### 5. Run the real HTTP contract check
+With the service running, exercise both endpoints, malformed JSON, unknown-field
+rejection, and a complete optimization request through HTTP:
+```bash
+GRIDWISE_BASE_URL=http://127.0.0.1:8000 \
+  ./.venv/bin/python tests/test_http.py
+```
+
+The successful response contains `scenario_id`, one ordered `directive_interpretation` entry per note, 24 `hourly_plan` entries, and recalculated `total_grid_kwh`, `total_cost_bdt`, `peak_grid_kwh`, and `plan_summary` fields. The public sample runner independently checks those fields through `replay_and_verify_schedule`.
+
+The repository includes a complete machine-valid example pair:
+
+- Request: [`tests/samples/sample_request.json`](tests/samples/sample_request.json)
+- Response: [`tests/samples/sample_response.json`](tests/samples/sample_response.json)
+
+The response contains all 24 `hourly_plan` objects and every required top-level
+field; no pseudo-JSON abbreviations are used.
 
 ---
 
@@ -194,13 +228,19 @@ docker build -t gridwise-llm:latest .
 
 ### Run the Container
 ```bash
+# Clean up any existing container with the same name
+docker rm -f gridwise_service 2>/dev/null || true
+
 docker run -d \
   --name gridwise_service \
   -p 8000:8000 \
-  -e OPENAI_API_KEY="your_openai_key" \
-  -e GEMINI_API_KEY="your_gemini_key" \
+  --env-file .env \
   gridwise-llm:latest
 ```
+
+The `.env` file must supply at least one valid model credential. Keep it outside
+the image and never commit it. The keyless emergency parser exists only for
+local diagnostics and is not the mandatory LLM execution path used for judging.
 
 Verify the container is responding:
 ```bash
@@ -227,3 +267,6 @@ curl http://localhost:8000/health
 ## 8. Known Limitations & Notes
 - Campus export back into the main grid is not supported per challenge rules.
 - Scenarios assume hourly intervals ($h=0 \dots 23$).
+- Hosted-model credentials, quota, cost, rate limits, and availability remain the team's responsibility.
+- If both hosted providers are unavailable, the emergency parser preserves service continuity but does not replace the challenge requirement to operate with a language-capable model during judging.
+- The exact public endpoint, repository URL, registry tag/digest, and video URL are supplied through the official submission fields and must remain reachable throughout evaluation.
