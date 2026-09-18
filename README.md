@@ -261,12 +261,3 @@ curl http://localhost:8000/health
 | `no_op` | Distractor / non-actionable note | `applies: false`, `structured_adjustment: null` |
 
 *All hour intervals are start-inclusive and end-exclusive (e.g. 1 PM to 3 PM $\rightarrow$ `[13, 14]`).*
-
----
-
-## 8. Known Limitations & Notes
-- Campus export back into the main grid is not supported per challenge rules.
-- Scenarios assume hourly intervals ($h=0 \dots 23$).
-- Hosted-model credentials, quota, cost, rate limits, and availability remain the team's responsibility.
-- If both hosted providers are unavailable, the emergency parser preserves service continuity but does not replace the challenge requirement to operate with a language-capable model during judging.
-- The exact public endpoint, repository URL, registry tag/digest, and video URL are supplied through the official submission fields and must remain reachable throughout evaluation.
