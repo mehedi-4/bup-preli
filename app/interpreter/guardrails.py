@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Optional
 from app.schemas import DirectiveInterpretationEntry, BatteryInput
 
+from app.interpreter.heuristics import parse_time_window
+
 ALLOWED_DIRECTIVES = {
     "solar_reduction",
     "minimum_battery_reserve",
@@ -28,7 +30,8 @@ def clean_and_validate_hours(raw_hours: Any) -> List[int]:
 def validate_and_sanitize_directive(
     raw_entry: Dict[str, Any],
     note_idx: int,
-    battery: BatteryInput
+    battery: BatteryInput,
+    note_text: Optional[str] = None
 ) -> DirectiveInterpretationEntry:
     """
     Validates a raw directive dictionary against Problem Statement guardrails (Section 08 & 04).
@@ -59,6 +62,15 @@ def validate_and_sanitize_directive(
 
     raw_adj = raw_entry.get("structured_adjustment") or {}
     hours = clean_and_validate_hours(raw_adj.get("hours"))
+
+    # Canonical hour window reconciliation:
+    # If the note explicitly specifies a literal time window (e.g. 6 PM until 10 PM),
+    # ensure any boundary/off-by-one LLM artifacts are normalized to exact start-inclusive, end-exclusive hours.
+    if note_text:
+        canonical = parse_time_window(note_text)
+        if canonical:
+            if not hours or set(hours).issubset(set(canonical)) or (hours and hours[0] == canonical[0]):
+                hours = canonical
 
     if not hours:
         # Directive without valid hours cannot be applied -> downgrade to no_op
@@ -154,7 +166,7 @@ def validate_interpretations_list(
             "structured_adjustment": None,
             "explanation": "No directive generated; defaulted to no_op."
         })
-        entry = validate_and_sanitize_directive(raw, idx, battery)
+        entry = validate_and_sanitize_directive(raw, idx, battery, note_text=operator_notes[idx])
         validated.append(entry)
 
     return validated

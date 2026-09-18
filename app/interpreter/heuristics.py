@@ -28,7 +28,7 @@ def parse_time_window(text: str) -> List[int]:
             hr = 0
         return hr if 0 <= hr <= 24 else None
 
-    # Pattern 1: from X until/to Y (am/pm)
+    # Time window extraction patterns
     patterns = [
         r"(?:from|between)\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?|noon|midnight)\s+(?:until|to|and)\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?|noon|midnight)",
         r"([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)\s*(?:-|to|until)\s*([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)"
@@ -37,11 +37,11 @@ def parse_time_window(text: str) -> List[int]:
     for pat in patterns:
         m = re.search(pat, text)
         if m:
-            start_str, end_str = m.group(1), m.group(2)
-            # If end has am/pm but start does not, propagate
-            if ("pm" in end_str or "am" in end_str) and not ("pm" in start_str or "am" in start_str):
+            start_str, end_str = m.group(1).strip(), m.group(2).strip()
+            # If end has am/pm but start does not (and is not noon/midnight), propagate meridiem
+            if start_str not in ("noon", "midnight") and ("pm" in end_str or "am" in end_str) and not ("pm" in start_str or "am" in start_str):
                 meridiem = "pm" if "pm" in end_str else "am"
-                start_str = f"{start_str.strip()} {meridiem}"
+                start_str = f"{start_str} {meridiem}"
             start_h = parse_time_str(start_str)
             end_h = parse_time_str(end_str)
             if start_h is not None and end_h is not None and start_h < end_h:

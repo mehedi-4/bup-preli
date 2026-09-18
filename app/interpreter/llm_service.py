@@ -1,5 +1,6 @@
 import json
 import logging
+import httpx
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
@@ -21,8 +22,8 @@ class LLMDirectiveItem(BaseModel):
     note_index: int
     applies: bool
     directive_type: str
-    structured_adjustment: Optional[LLMDirectiveAdjustment] = None
     explanation: str
+    structured_adjustment: Optional[LLMDirectiveAdjustment] = None
 
 class LLMInterpretationEnvelope(BaseModel):
     directives: List[LLMDirectiveItem]
@@ -44,19 +45,27 @@ DIRECTIVE RULES:
    - "max_grid_window": Grid import capped. Requires: "hours", "max_grid_kwh".
    - "no_op": Note does NOT affect today's energy schedule (distractors, cafeteria menus, sports registration, library hours, next week notices). For no_op: applies MUST be false, structured_adjustment MUST be null.
 
-2. TIME WINDOW RULES:
-   - Time ranges are start-inclusive and end-exclusive!
-   - Examples:
-     "noon until 2 PM" -> [12, 13]
-     "1 PM to 3 PM" -> [13, 14]
-     "2 AM until 5 AM" -> [2, 3, 4]
-     "6 PM until 9 PM" -> [18, 19, 20]
-     "6 PM until 10 PM" -> [18, 19, 20, 21]
-     "7 PM until 9 PM" -> [19, 20]
-     "10 AM until noon" -> [10, 11]
-     "11 AM until 1 PM" -> [11, 12]
-     "11 AM until 2 PM" -> [11, 12, 13]
-     "5 PM until 7 PM" -> [17, 18]
+2. TIME WINDOW RULES (CRITICAL):
+   - Time ranges are start-inclusive and end-exclusive.
+   - 24-HOUR LOOKUP TABLE:
+     12 AM (midnight) = 0 | 1 AM = 1 | 2 AM = 2 | 3 AM = 3 | 4 AM = 4 | 5 AM = 5
+     6 AM = 6 | 7 AM = 7 | 8 AM = 8 | 9 AM = 9 | 10 AM = 10 | 11 AM = 11
+     12 PM (noon) = 12 | 1 PM = 13 | 2 PM = 14 | 3 PM = 15 | 4 PM = 16 | 5 PM = 17
+     6 PM = 18 | 7 PM = 19 | 8 PM = 20 | 9 PM = 21 | 10 PM = 22 | 11 PM = 23
+   - FORMULA:
+     Look up H_start and H_end from the table above.
+     The affected hours array is strictly list(range(H_start, H_end)).
+   - EXAMPLES:
+     "from 6 PM until 9 PM" -> H_start=18, H_end=21 -> [18, 19, 20] (3 hours).
+     "from 6 PM until 10 PM" -> H_start=18, H_end=22 -> [18, 19, 20, 21] (4 hours).
+     "from 7 PM until 10 PM" -> H_start=19, H_end=22 -> [19, 20, 21] (3 hours).
+     "from 7 PM until 9 PM" -> H_start=19, H_end=21 -> [19, 20] (2 hours).
+     "between 11 AM and 2 PM" -> H_start=11, H_end=14 -> [11, 12, 13] (3 hours).
+     "noon until 2 PM" -> H_start=12, H_end=14 -> [12, 13] (2 hours).
+     "from 2 AM until 5 AM" -> H_start=2, H_end=5 -> [2, 3, 4] (3 hours).
+     "from 10 AM until noon" -> H_start=10, H_end=12 -> [10, 11] (2 hours).
+     "from 11 AM until 1 PM" -> H_start=11, H_end=13 -> [11, 12] (2 hours).
+     "from 5 PM until 7 PM" -> H_start=17, H_end=19 -> [17, 18] (2 hours).
    - "hours" must be unique integers from 0 through 23 in ascending order.
 
 3. MAPPING RULES:
@@ -75,7 +84,10 @@ class LLMService:
         if self._openai_client is None and settings.OPENAI_API_KEY:
             try:
                 from openai import OpenAI
-                self._openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                self._openai_client = OpenAI(
+                    api_key=settings.OPENAI_API_KEY,
+                    http_client=httpx.Client(timeout=settings.REQUEST_TIMEOUT_SECONDS)
+                )
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI client: {e}")
         return self._openai_client
