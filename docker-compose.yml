@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  gridwise-api:
+    build: .
+    image: gridwise-llm:latest
+    container_name: gridwise_service
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      - PRIMARY_PROVIDER=${PRIMARY_PROVIDER:-openai}
+      - PORT=8000
+      - HOST=0.0.0.0
+    restart: unless-stopped
